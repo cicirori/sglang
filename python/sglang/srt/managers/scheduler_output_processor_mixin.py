@@ -283,17 +283,17 @@ class SchedulerOutputProcessorMixin:
                             batch.out_cache_loc[i : i + 1]
                         )
                 else:
-                    if batch.spec_algorithm.is_eagle():
-                        # TODO(lsyin): support eagle with page_size > 1
-                        raise NotImplementedError()
-                    else:
-                        if (
-                            len(req.origin_input_ids) + len(req.output_ids) - 1
-                        ) % self.page_size == 0:
-                            # Only free when the extra token is in a new page
-                            self.token_to_kv_pool_allocator.free(
-                                batch.out_cache_loc[i : i + 1]
-                            )
+                    # if batch.spec_algorithm.is_eagle():
+                    #     # TODO(lsyin): support eagle with page_size > 1
+                    #     raise NotImplementedError()
+                    # else:
+                    if (
+                        len(req.origin_input_ids) + len(req.output_ids) - 1
+                    ) % self.page_size == 0:
+                        # Only free when the extra token is in a new page
+                        self.token_to_kv_pool_allocator.free(
+                            batch.out_cache_loc[i : i + 1]
+                        )
                 continue
 
             if batch.spec_algorithm.is_none():

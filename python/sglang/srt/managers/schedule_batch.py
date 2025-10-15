@@ -63,7 +63,9 @@ from sglang.srt.mem_cache.chunk_cache import ChunkCache, SWAChunkCache
 from sglang.srt.mem_cache.common import (
     alloc_for_decode,
     alloc_for_extend,
+    alloc_paged_token_slots_extend,
     alloc_token_slots,
+    get_last_loc,
 )
 from sglang.srt.mem_cache.mamba_radix_cache import MambaRadixCache
 from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool, ReqToTokenPool
@@ -1073,9 +1075,43 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # Now seq_lens and allocate_lens are correct
         self.maybe_wait_verify_done()
 
-        new_allocate_lens = self.seq_lens + EagleDraftInput.ALLOC_LEN_PER_DECODE
-        num_needed_tokens = (new_allocate_lens - draft_input.allocate_lens).sum().item()
-        out_cache_loc = alloc_token_slots(self.tree_cache, num_needed_tokens)
+        # FIXME(lsyin): remove seq_lens_sum calculation
+        self.seq_lens_cpu = self.seq_lens.cpu()
+        self.seq_lens_sum = self.seq_lens_cpu.sum().item()
+
+        # copy from python/sglang/srt/speculative/eagle_info.py:prepare_for_verify
+        page_size = get_global_server_args().page_size
+
+        if page_size == 1:
+            new_allocate_lens = self.seq_lens + EagleDraftInput.ALLOC_LEN_PER_DECODE
+            num_needed_tokens = (
+                (new_allocate_lens - draft_input.allocate_lens).sum().item()
+            )
+            out_cache_loc = alloc_token_slots(self.tree_cache, num_needed_tokens)
+        else:
+
+            prefix_lens = self.seq_lens
+            prefix_lens_cpu = self.seq_lens_cpu
+            new_allocate_lens = prefix_lens + EagleDraftInput.ALLOC_LEN_PER_DECODE
+            new_allocate_lens_cpu = (
+                prefix_lens_cpu + EagleDraftInput.ALLOC_LEN_PER_DECODE
+            )
+            last_loc = get_last_loc(
+                self.req_to_token_pool.req_to_token,
+                self.req_pool_indices,
+                prefix_lens,
+            )
+            out_cache_loc = alloc_paged_token_slots_extend(
+                self.tree_cache,
+                prefix_lens,
+                prefix_lens_cpu,
+                new_allocate_lens,
+                new_allocate_lens_cpu,
+                last_loc,
+                len(self.input_ids),
+            )
+            self.out_cache_loc = out_cache_loc
+            self.last_loc = last_loc
 
         assign_req_to_token_pool[(bs,)](
             self.req_pool_indices,
@@ -1087,10 +1123,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             next_power_of_2(bs),
         )
         draft_input.allocate_lens = new_allocate_lens
-
-        # FIXME(lsyin): remove seq_lens_sum calculation
-        self.seq_lens_cpu = self.seq_lens.cpu()
-        self.seq_lens_sum = self.seq_lens_cpu.sum().item()
 
     def prepare_encoder_info_extend(self, input_ids: List[int], seq_lens: List[int]):
         self.encoder_lens_cpu = []
@@ -1747,6 +1779,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             seq_lens=self.seq_lens,
             orig_seq_lens=self.orig_seq_lens,
             out_cache_loc=self.out_cache_loc,
+            tree_cache=self.tree_cache,
             seq_lens_cpu=seq_lens_cpu,
             seq_lens_sum=self.seq_lens_sum,
             return_logprob=self.return_logprob,
@@ -1857,6 +1890,7 @@ class ModelWorkerBatch:
     # The sequence length tensor on CPU
     seq_lens_cpu: Optional[torch.Tensor]
     seq_lens_sum: int
+    tree_cache: BasePrefixCache  # The tree cache
 
     # For logprob
     return_logprob: bool

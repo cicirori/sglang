@@ -11,6 +11,7 @@ import triton.language as tl
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch
+from sglang.srt.mem_cache.common import alloc_paged_token_slots_extend, get_last_loc
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
@@ -22,6 +23,7 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.build_eagle_tree import TreeMaskMode
 from sglang.srt.speculative.spec_utils import (
     SIMULATE_ACC_LEN,
+    assign_draft_cache_locs,
     generate_simulated_accept_index,
 )
 from sglang.srt.utils.common import fast_topk, is_cuda, is_hip, next_power_of_2
@@ -43,6 +45,23 @@ if is_cuda():
     from sgl_kernel.top_k import fast_topk
 elif is_hip():
     from sgl_kernel import verify_tree_greedy
+
+
+@torch.compile(dynamic=True)
+def get_last_loc_large_page_size_top_k_1(
+    req_to_token: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    seq_lens,
+    speculative_num_steps: int,
+):
+    prefix_lens = seq_lens
+    seq_lens = prefix_lens + speculative_num_steps
+    last_loc = get_last_loc(
+        req_to_token,
+        req_pool_indices,
+        prefix_lens,
+    )
+    return prefix_lens, seq_lens, last_loc
 
 
 @triton.jit
@@ -85,28 +104,78 @@ class EagleDraftInputV2Mixin:
     ):
         bs = len(batch.seq_lens)
 
-        # Assign cache locations
-        batch.out_cache_loc = torch.empty(
-            (bs * topk * num_steps,),
-            dtype=torch.int64,
-            device=batch.input_ids.device,
+        num_new_pages_per_topk = torch.empty(
+            (), dtype=torch.int64, device=batch.input_ids.device
         )
-        # FIXME(lsyin): align with the default code path
-        assign_draft_cache_locs_page_size_1[(bs,)](
-            batch.req_pool_indices,
-            req_to_token_pool.req_to_token,
-            batch.seq_lens,
-            batch.out_cache_loc,
-            req_to_token_pool.req_to_token.shape[1],
-            topk,
-            num_steps,
-        )
+        extend_lens = torch.empty((), dtype=torch.int64, device=batch.input_ids.device)
+        # get from python/sglang/srt/speculative/eagle_worker.py:_draft_preprocess_decode
+        page_size = get_global_server_args().page_size
+        if page_size == 1:
+            # Assign cache locations
+            batch.out_cache_loc = torch.empty(
+                (bs * topk * num_steps,),
+                dtype=torch.int64,
+                device=batch.input_ids.device,
+            )
+            # FIXME(lsyin): align with the default code path
+            assign_draft_cache_locs_page_size_1[(bs,)](
+                batch.req_pool_indices,
+                req_to_token_pool.req_to_token,
+                batch.seq_lens,
+                batch.out_cache_loc,
+                req_to_token_pool.req_to_token.shape[1],
+                topk,
+                num_steps,
+            )
+        else:
+            # assert self.top_k == 1
+            prefix_lens, seq_lens, last_loc = get_last_loc_large_page_size_top_k_1(
+                req_to_token_pool.req_to_token,
+                batch.req_pool_indices,
+                batch.seq_lens,
+                num_steps,
+            )
+            prefix_lens_cpu = batch.seq_lens_cpu
+            seq_lens_cpu = batch.seq_lens_cpu + num_steps
+            extend_num_tokens = bs * num_steps
+
+            batch.out_cache_loc, token_to_kv_pool_state_backup = (
+                alloc_paged_token_slots_extend(
+                    batch.tree_cache,
+                    prefix_lens,
+                    prefix_lens_cpu,
+                    seq_lens,
+                    seq_lens_cpu,
+                    last_loc,
+                    extend_num_tokens,
+                    backup_state=True,
+                )
+            )
+
+            assign_draft_cache_locs[(bs,)](
+                batch.req_pool_indices,
+                req_to_token_pool.req_to_token,
+                batch.seq_lens,
+                extend_lens,
+                num_new_pages_per_topk,
+                batch.out_cache_loc,
+                req_to_token_pool.req_to_token.shape[1],
+                1,  # topk hack
+                num_steps,
+                page_size,
+                next_power_of_2(bs),
+                next_power_of_2(num_steps),
+            )
 
         # Get a forward batch
         batch.capture_hidden_mode = CaptureHiddenMode.LAST
         self.positions = batch.seq_lens.repeat_interleave(topk, dim=0)
         forward_batch = ForwardBatch.init_new(batch, draft_model_runner)
         can_cuda_graph = cuda_graph_runner and cuda_graph_runner.can_run(forward_batch)
+        if page_size > 1:
+            batch.token_to_kv_pool_allocator.restore_state(
+                token_to_kv_pool_state_backup
+            )
         return forward_batch, can_cuda_graph
 
     def prepare_for_extend_to_fill_draft_kvcache(
