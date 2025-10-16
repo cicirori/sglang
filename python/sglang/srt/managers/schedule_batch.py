@@ -77,7 +77,7 @@ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs, get_global_server_args
 from sglang.srt.utils import flatten_nested_list
-from sglang.srt.utils.common import next_power_of_2
+from sglang.srt.utils.common import cprint, next_power_of_2
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -1081,37 +1081,33 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # copy from python/sglang/srt/speculative/eagle_info.py:prepare_for_verify
         page_size = get_global_server_args().page_size
-
+        new_allocate_lens = self.seq_lens + EagleDraftInput.ALLOC_LEN_PER_DECODE
+        num_needed_tokens = (new_allocate_lens - draft_input.allocate_lens).sum().item()
         if page_size == 1:
-            new_allocate_lens = self.seq_lens + EagleDraftInput.ALLOC_LEN_PER_DECODE
-            num_needed_tokens = (
-                (new_allocate_lens - draft_input.allocate_lens).sum().item()
-            )
             out_cache_loc = alloc_token_slots(self.tree_cache, num_needed_tokens)
         else:
-
-            prefix_lens = self.seq_lens
-            prefix_lens_cpu = self.seq_lens_cpu
-            new_allocate_lens = prefix_lens + EagleDraftInput.ALLOC_LEN_PER_DECODE
-            new_allocate_lens_cpu = (
-                prefix_lens_cpu + EagleDraftInput.ALLOC_LEN_PER_DECODE
-            )
+            # Paged allocation - build last_loc
             last_loc = get_last_loc(
                 self.req_to_token_pool.req_to_token,
                 self.req_pool_indices,
-                prefix_lens,
+                draft_input.allocate_lens,
             )
             out_cache_loc = alloc_paged_token_slots_extend(
-                self.tree_cache,
-                prefix_lens,
-                prefix_lens_cpu,
-                new_allocate_lens,
-                new_allocate_lens_cpu,
-                last_loc,
-                len(self.input_ids),
+                tree_cache=self.tree_cache,
+                prefix_lens=draft_input.allocate_lens,
+                prefix_lens_cpu=draft_input.allocate_lens.cpu(),
+                seq_lens=new_allocate_lens,
+                seq_lens_cpu=new_allocate_lens.cpu(),
+                last_loc=last_loc,
+                extend_num_tokens=num_needed_tokens,
             )
-            self.out_cache_loc = out_cache_loc
-            self.last_loc = last_loc
+            # self.out_cache_loc = out_cache_loc
+            # self.last_loc = last_loc
+        # cprint(f"{self.req_to_token_pool.req_to_token[self.req_pool_indices][:12]=}")
+        cprint(
+            f"{EagleDraftInput.ALLOC_LEN_PER_DECODE=},{num_needed_tokens=}, {self.seq_lens},{draft_input.allocate_lens=}, {new_allocate_lens=}, {out_cache_loc=}",
+            "Green",
+        )
 
         assign_req_to_token_pool[(bs,)](
             self.req_pool_indices,

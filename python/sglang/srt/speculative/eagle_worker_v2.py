@@ -466,6 +466,7 @@ def free_spec_dec_tokens_page_size_1(
     req: Req,
     allocate_len: int,
     new_seq_len: int,
+    page_size: int = 1,
 ):
     # FIXME(lsyin): move this function elsewhere
 
@@ -476,7 +477,41 @@ def free_spec_dec_tokens_page_size_1(
     else:
         # True for 1) non-overlap; 2) overlap eagle and the current batch is prefill. This seq will not run extra iteration, so start_lens is passed in.
         start_len = new_seq_len
+
     indices_to_free = req_to_token_pool.req_to_token[req.req_pool_idx][
         start_len:allocate_len
     ]
     token_to_kv_pool_allocator.free(indices_to_free)
+    if page_size == 1:
+        # For page_size = 1, free tokens directly
+        token_to_kv_pool_allocator.free(indices_to_free)
+    else:
+        # For page_size > 1, need to handle page-aligned freeing
+        if len(indices_to_free) > 0:
+            # Convert token indices to page indices and free only full pages
+            page_indices = indices_to_free // page_size
+            unique_page_indices = torch.unique(page_indices)
+
+            # Only free pages that are completely unused
+            for page_idx in unique_page_indices:
+                page_start = page_idx * page_size
+                page_end = page_start + page_size
+
+                # Check if the entire page is within the range to be freed
+                if page_start >= start_len and page_end <= allocate_len:
+                    # Free the entire page
+                    page_tokens = torch.arange(
+                        page_start, page_end, device=indices_to_free.device
+                    )
+                    token_to_kv_pool_allocator.free(page_tokens)
+                else:
+                    # For partial pages, we need to be more careful
+                    # Only free tokens that are actually in the range to be freed
+                    page_tokens = torch.arange(
+                        page_start, page_end, device=indices_to_free.device
+                    )
+                    tokens_to_free = page_tokens[
+                        (page_tokens >= start_len) & (page_tokens < allocate_len)
+                    ]
+                    if len(tokens_to_free) > 0:
+                        token_to_kv_pool_allocator.free(tokens_to_free)

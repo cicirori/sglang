@@ -115,6 +115,25 @@ builtins.FP8_E4M3_MAX = FP8_E4M3_MAX
 builtins.FP8_E4M3_MIN = FP8_E4M3_MIN
 
 
+def cprint(text, color="default"):
+    colors = {
+        "default": "0",
+        "red": "31",
+        "green": "32",
+        "yellow": "33",
+        "blue": "34",
+        "magenta": "35",
+        "cyan": "36",
+        "white": "37",
+    }
+    code = colors.get(color.lower(), "0")
+    print(f"\033[{code}m{text}\033[0m")
+
+
+cprint("Hello Red", "red")
+cprint("Hello Green", "green")
+
+
 def is_cuda():
     return torch.cuda.is_available() and torch.version.cuda
 
