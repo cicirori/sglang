@@ -1727,10 +1727,14 @@ class Scheduler(
                 self.max_total_num_tokens
                 - protected_size
             )
-            token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
+            memory_leak_num = (self.max_total_num_tokens - protected_size) - (
+                available_size + evictable_size
+            )
+            token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}, {memory_leak_num=}\n"
 
         if memory_leak:
             msg = "token_to_kv_pool_allocator memory leak detected! " f"{token_msg}"
+            # logger.warning(msg)
             raise ValueError(msg)
 
         if self.disaggregation_mode == DisaggregationMode.DECODE:

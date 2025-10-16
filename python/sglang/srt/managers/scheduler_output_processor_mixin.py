@@ -276,6 +276,7 @@ class SchedulerOutputProcessorMixin:
                             req,
                             last_batch_allocate_lens_cpu[i],
                             None,
+                            self.page_size,
                         )
                     else:
                         # Free the one extra delayed token
@@ -283,17 +284,33 @@ class SchedulerOutputProcessorMixin:
                             batch.out_cache_loc[i : i + 1]
                         )
                 else:
-                    # if batch.spec_algorithm.is_eagle():
-                    #     # TODO(lsyin): support eagle with page_size > 1
-                    #     raise NotImplementedError()
-                    # else:
-                    if (
-                        len(req.origin_input_ids) + len(req.output_ids) - 1
-                    ) % self.page_size == 0:
-                        # Only free when the extra token is in a new page
-                        self.token_to_kv_pool_allocator.free(
-                            batch.out_cache_loc[i : i + 1]
+                    if batch.spec_algorithm.is_eagle():
+                        # TODO(lsyin): support eagle with page_size > 1
+                        pass
+                        # raise NotImplementedError()
+                        from sglang.srt.speculative.eagle_worker_v2 import (
+                            free_spec_dec_tokens_page_size_1,
                         )
+
+                        # if (
+                        #     len(req.origin_input_ids) + len(req.output_ids) - 1
+                        # ) % self.page_size == 0:
+                        free_spec_dec_tokens_page_size_1(
+                            self.req_to_token_pool,
+                            self.token_to_kv_pool_allocator,
+                            req,
+                            last_batch_allocate_lens_cpu[i],
+                            None,
+                            self.page_size,
+                        )
+                    else:
+                        if (
+                            len(req.origin_input_ids) + len(req.output_ids) - 1
+                        ) % self.page_size == 0:
+                            # Only free when the extra token is in a new page
+                            self.token_to_kv_pool_allocator.free(
+                                batch.out_cache_loc[i : i + 1]
+                            )
                 continue
 
             if batch.spec_algorithm.is_none():
@@ -325,6 +342,7 @@ class SchedulerOutputProcessorMixin:
                         req,
                         last_batch_allocate_lens_cpu[i],
                         new_seq_len,
+                        self.page_size,
                     )
 
                 if self.server_args.disaggregation_decode_enable_offload_kvcache:

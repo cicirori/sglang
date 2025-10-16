@@ -22,7 +22,7 @@ from sglang.srt.speculative.eagle_info_v2 import (
     select_top_k_tokens_tmp,
 )
 from sglang.srt.speculative.eagle_worker import EAGLEWorker
-from sglang.srt.utils.common import fast_topk, next_power_of_2
+from sglang.srt.utils.common import empty_context, fast_topk, next_power_of_2
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ class EAGLEWorkerV2(EAGLEWorker):
         self.plan_stream: CudaStream = torch.get_device_module(self.device).Stream()
         # TODO(lsyin): potential bugs with a separate plan stream
         self.plan_stream_ctx = torch.cuda.stream(self.plan_stream)
+        self.plan_stream_ctx = empty_context()
 
     def forward_batch_generation(self, model_worker_batch: ModelWorkerBatch):
         if model_worker_batch.forward_mode.is_decode():
@@ -466,7 +467,7 @@ def free_spec_dec_tokens_page_size_1(
     req: Req,
     allocate_len: int,
     new_seq_len: int,
-    page_size: int = 1,
+    page_size: int,
 ):
     # FIXME(lsyin): move this function elsewhere
 
@@ -481,37 +482,36 @@ def free_spec_dec_tokens_page_size_1(
     indices_to_free = req_to_token_pool.req_to_token[req.req_pool_idx][
         start_len:allocate_len
     ]
-    token_to_kv_pool_allocator.free(indices_to_free)
+
+    print(f"page size check {page_size} {page_size == 1}")
+
     if page_size == 1:
         # For page_size = 1, free tokens directly
         token_to_kv_pool_allocator.free(indices_to_free)
     else:
-        # For page_size > 1, need to handle page-aligned freeing
-        if len(indices_to_free) > 0:
-            # Convert token indices to page indices and free only full pages
-            page_indices = indices_to_free // page_size
-            unique_page_indices = torch.unique(page_indices)
+        # For page_size > 1, we need to align to page boundaries
+        # Only evict full empty pages, not partial pages
+        req_token_indices = req_to_token_pool.req_to_token[req.req_pool_idx]
 
-            # Only free pages that are completely unused
-            for page_idx in unique_page_indices:
-                page_start = page_idx * page_size
-                page_end = page_start + page_size
+        # Calculate the range of tokens to potentially free
+        tokens_to_free = req_token_indices[start_len:allocate_len]
 
-                # Check if the entire page is within the range to be freed
-                if page_start >= start_len and page_end <= allocate_len:
-                    # Free the entire page
-                    page_tokens = torch.arange(
-                        page_start, page_end, device=indices_to_free.device
-                    )
-                    token_to_kv_pool_allocator.free(page_tokens)
-                else:
-                    # For partial pages, we need to be more careful
-                    # Only free tokens that are actually in the range to be freed
-                    page_tokens = torch.arange(
-                        page_start, page_end, device=indices_to_free.device
-                    )
-                    tokens_to_free = page_tokens[
-                        (page_tokens >= start_len) & (page_tokens < allocate_len)
-                    ]
-                    if len(tokens_to_free) > 0:
-                        token_to_kv_pool_allocator.free(tokens_to_free)
+        if len(tokens_to_free) == 0:
+            return
+
+        # Align the start position to page boundary
+        # We need to find the first page-aligned position that includes our start_len
+        seq_len = start_len
+        num_tokens_to_free = allocate_len - start_len
+
+        # Calculate the page-aligned start position
+        # This ensures we only free complete pages
+        page_aligned_start = (
+            seq_len + num_tokens_to_free - 1
+        ) // page_size * page_size - seq_len
+        page_aligned_start = max(page_aligned_start, 0)
+
+        # Only free tokens from the page-aligned start position
+        if page_aligned_start < num_tokens_to_free:
+            aligned_tokens_to_free = tokens_to_free[page_aligned_start:]
+            token_to_kv_pool_allocator.free(aligned_tokens_to_free)
