@@ -571,10 +571,7 @@ class TRTLLMMLABackend(FlashInferMLAAttnBackend):
         cos_sin_cache: Optional[torch.Tensor] = None,
         is_neox: Optional[bool] = False,
     ) -> torch.Tensor:
-        if (
-            forward_batch.forward_mode.is_draft_extend()
-            or forward_batch.forward_mode.is_draft_extend_v2()
-        ):
+        if forward_batch.forward_mode.is_draft_extend():
             return super().forward_extend(
                 q, k, v, layer, forward_batch, save_kv_cache, q_rope, k_rope
             )

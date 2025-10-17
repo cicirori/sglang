@@ -253,7 +253,7 @@ class SchedulerOutputProcessorMixin:
         if not self.spec_algorithm.is_none():
             self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
 
-        # self.token_to_kv_pool_allocator.free_group_begin()
+        self.token_to_kv_pool_allocator.free_group_begin()
         print(
             f"Batch is v2 eagle: {batch.is_v2_eagle}, Forward mode is extend: {self.cur_batch.forward_mode.is_extend() if self.cur_batch and self.cur_batch.forward_mode else 'N/A'}"
         )
@@ -288,16 +288,11 @@ class SchedulerOutputProcessorMixin:
                         )
                 else:
                     if batch.spec_algorithm.is_eagle():
-                        # TODO(lsyin): support eagle with page_size > 1
-                        pass
-                        # raise NotImplementedError()
+                        # TODO(yliu): refactor this logic
                         from sglang.srt.speculative.eagle_worker_v2 import (
                             free_spec_dec_tokens_page_size_1,
                         )
 
-                        # if (
-                        #     len(req.origin_input_ids) + len(req.output_ids) - 1
-                        # ) % self.page_size == 0:
                         free_spec_dec_tokens_page_size_1(
                             self.req_to_token_pool,
                             self.token_to_kv_pool_allocator,
@@ -398,7 +393,7 @@ class SchedulerOutputProcessorMixin:
                 req.grammar.finished = req.finished()
 
         self.stream_output(batch.reqs, batch.return_logprob)
-        # self.token_to_kv_pool_allocator.free_group_end()
+        self.token_to_kv_pool_allocator.free_group_end()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
         if (

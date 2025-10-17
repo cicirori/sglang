@@ -148,7 +148,7 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def alloc(self, need_size: int):
         logger.info(
-            f"Allocating {need_size} tokens from paged allocator\n{''.join(traceback.format_stack())}"
+            f"Allocating {need_size} tokens from ps1 allocator\n{''.join(traceback.format_stack())}"
         )
         if self.need_sort and need_size > len(self.free_pages):
             self.merge_and_sort_free()
@@ -162,7 +162,7 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def free(self, free_index: torch.Tensor):
         logger.info(
-            f"Freeing {free_index.numel()} tokens from paged allocator\n{''.join(traceback.format_stack())}"
+            f"Freeing {free_index.numel()} tokens from ps1 allocator\n{''.join(traceback.format_stack())}"
         )
         if free_index.numel() == 0:
             return

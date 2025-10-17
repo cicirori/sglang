@@ -1079,7 +1079,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.seq_lens_cpu = self.seq_lens.cpu()
         self.seq_lens_sum = self.seq_lens_cpu.sum().item()
 
-        # copy from python/sglang/srt/speculative/eagle_info.py:prepare_for_verify
+        # get from python/sglang/srt/speculative/eagle_info.py:_draft_preprocess_decode
         page_size = get_global_server_args().page_size
         new_allocate_lens = self.seq_lens + EagleDraftInput.ALLOC_LEN_PER_DECODE
         num_needed_tokens = (new_allocate_lens - draft_input.allocate_lens).sum().item()
@@ -1101,8 +1101,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 last_loc=last_loc,
                 extend_num_tokens=num_needed_tokens,
             )
-            # self.out_cache_loc = out_cache_loc
-            # self.last_loc = last_loc
+
         # cprint(f"{last_loc=} {self.req_to_token_pool.req_to_token[self.req_pool_indices].tolist()=}", "green")
         # cprint(f"{self.req_to_token_pool.req_to_token[self.req_pool_indices][:12]=}")
         cprint(

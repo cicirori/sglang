@@ -47,23 +47,6 @@ elif is_hip():
     from sgl_kernel import verify_tree_greedy
 
 
-@torch.compile(dynamic=True)
-def get_last_loc_large_page_size_top_k_1(
-    req_to_token: torch.Tensor,
-    req_pool_indices: torch.Tensor,
-    seq_lens,
-    speculative_num_steps: int,
-):
-    prefix_lens = seq_lens
-    seq_lens = prefix_lens + speculative_num_steps
-    last_loc = get_last_loc(
-        req_to_token,
-        req_pool_indices,
-        prefix_lens,
-    )
-    return prefix_lens, seq_lens, last_loc
-
-
 @triton.jit
 def assign_draft_cache_locs_page_size_1_or_topk1(
     req_pool_indices,
@@ -104,12 +87,6 @@ class EagleDraftInputV2Mixin:
     ):
         bs = len(batch.seq_lens)
 
-        # num_new_pages_per_topk = torch.empty(
-        #     (), dtype=torch.int64, device=batch.input_ids.device
-        # )
-        # extend_lens = torch.empty((), dtype=torch.int64, device=batch.input_ids.device)
-        # get from python/sglang/srt/speculative/eagle_worker.py:_draft_preprocess_decode
-        # page_size = get_global_server_args().page_size
         # Assign cache locations
         batch.out_cache_loc = torch.empty(
             (bs * topk * num_steps,),
@@ -127,51 +104,12 @@ class EagleDraftInputV2Mixin:
             num_steps,
         )
         cprint(f"{batch.out_cache_loc=}", "red")
-        # if page_size == 1:
-
-        # else:
-        #     # # assert self.top_k == 1
-        #     # prefix_lens, seq_lens, last_loc = get_last_loc_large_page_size_top_k_1(
-        #     #     req_to_token_pool.req_to_token,
-        #     #     batch.req_pool_indices,
-        #     #     batch.seq_lens,
-        #     #     num_steps,
-        #     # )
-        #     # prefix_lens_cpu = batch.seq_lens_cpu
-        #     # seq_lens_cpu = batch.seq_lens_cpu + num_steps
-        #     # extend_num_tokens = bs * num_steps
-
-        #     batch.out_cache_loc = torch.empty(
-        #         (bs * topk * num_steps,),
-        #         dtype=torch.int64,
-        #         device=batch.input_ids.device,
-        #     )
-
-        #     assign_draft_cache_locs[(bs,)](
-        #         batch.req_pool_indices,
-        #         req_to_token_pool.req_to_token,
-        #         batch.seq_lens,
-        #         extend_lens,
-        #         num_new_pages_per_topk,
-        #         batch.out_cache_loc,
-        #         req_to_token_pool.req_to_token.shape[1],
-        #         1,  # topk hack
-        #         num_steps,
-        #         page_size,
-        #         next_power_of_2(bs),
-        #         next_power_of_2(num_steps),
-        #     )
-        #     cprint(f"{batch.out_cache_loc=}", "red")
 
         # Get a forward batch
         batch.capture_hidden_mode = CaptureHiddenMode.LAST
         self.positions = batch.seq_lens.repeat_interleave(topk, dim=0)
         forward_batch = ForwardBatch.init_new(batch, draft_model_runner)
         can_cuda_graph = cuda_graph_runner and cuda_graph_runner.can_run(forward_batch)
-        # if page_size > 1:
-        #     batch.token_to_kv_pool_allocator.restore_state(
-        #         token_to_kv_pool_state_backup
-        #     )
         return forward_batch, can_cuda_graph
 
     def prepare_for_extend_to_fill_draft_kvcache(

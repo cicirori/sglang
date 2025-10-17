@@ -334,7 +334,6 @@ class RadixCache(BasePrefixCache):
         print(f"{self.evictable_size_=}")
         token_ids = (req.origin_input_ids + req.output_ids)[:-1]
         all_token_len = len(token_ids)
-        # print(f"{all_token_len=}, {token_ids=}")
         # For EAGLE radix cache, we will convert the key to bigram key, e.g. [1,2,3,4] -> [(1,2), (2,3), (3,4)], the length will -1. ((len([(1,2), (2,3), (3,4)]) = len([1,2,3,4]) - 1))
         # So for the corresponding kv length should also -1. Then we get the actual_kv_len, and use it to do later calculation and slicing.
         actual_kv_len = all_token_len - 1 if self.is_eagle else all_token_len
