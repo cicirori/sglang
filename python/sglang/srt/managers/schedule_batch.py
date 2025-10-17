@@ -1103,6 +1103,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             )
             # self.out_cache_loc = out_cache_loc
             # self.last_loc = last_loc
+        # cprint(f"{last_loc=} {self.req_to_token_pool.req_to_token[self.req_pool_indices].tolist()=}", "green")
         # cprint(f"{self.req_to_token_pool.req_to_token[self.req_pool_indices][:12]=}")
         cprint(
             f"{EagleDraftInput.ALLOC_LEN_PER_DECODE=},{num_needed_tokens=}, {self.seq_lens},{draft_input.allocate_lens=}, {new_allocate_lens=}, {out_cache_loc=}",

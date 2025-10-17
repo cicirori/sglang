@@ -1457,6 +1457,9 @@ def _execute_server_warmup(
                 timeout=600,
             )
             assert res.status_code == 200, f"{res}"
+            logger.info(
+                f"End of standard mode warmup with status {res.status_code}, resp: {res.json()}"
+            )
             _global_state.tokenizer_manager.server_status = ServerStatus.Up
 
         else:

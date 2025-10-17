@@ -479,39 +479,167 @@ def free_spec_dec_tokens_page_size_1(
         # True for 1) non-overlap; 2) overlap eagle and the current batch is prefill. This seq will not run extra iteration, so start_lens is passed in.
         start_len = new_seq_len
 
-    indices_to_free = req_to_token_pool.req_to_token[req.req_pool_idx][
-        start_len:allocate_len
-    ]
-
-    print(f"page size check {page_size} {page_size == 1}")
+    # Debug logging to understand which case we're in
+    logger.info(
+        f"free_spec_dec_tokens_page_size_1: case analysis - "
+        f"new_seq_len={new_seq_len}, start_len={start_len}, allocate_len={allocate_len}, page_size={page_size}"
+    )
 
     if page_size == 1:
         # For page_size = 1, free tokens directly
+        indices_to_free = req_to_token_pool.req_to_token[req.req_pool_idx][
+            start_len:allocate_len
+        ]
         token_to_kv_pool_allocator.free(indices_to_free)
     else:
-        # For page_size > 1, we need to align to page boundaries
-        # Only evict full empty pages, not partial pages
-        req_token_indices = req_to_token_pool.req_to_token[req.req_pool_idx]
+        # For page_size > 1, we need to handle page alignment carefully
+        # to avoid conflicts with radix cache truncation
 
-        # Calculate the range of tokens to potentially free
+        req_token_indices = req_to_token_pool.req_to_token[req.req_pool_idx]
         tokens_to_free = req_token_indices[start_len:allocate_len]
 
         if len(tokens_to_free) == 0:
             return
 
-        # Align the start position to page boundary
-        # We need to find the first page-aligned position that includes our start_len
-        seq_len = start_len
-        num_tokens_to_free = allocate_len - start_len
+        if new_seq_len is None:
+            # Case 1: Radix cache truncation happens BEFORE this function
+            # We need to be careful not to double-free tokens that radix cache already handled
 
-        # Calculate the page-aligned start position
-        # This ensures we only free complete pages
-        page_aligned_start = (
-            seq_len + num_tokens_to_free - 1
-        ) // page_size * page_size - seq_len
-        page_aligned_start = max(page_aligned_start, 0)
+            # Calculate the actual sequence length that radix cache sees
+            actual_seq_len = len(req.origin_input_ids) + len(req.output_ids) - 1
 
-        # Only free tokens from the page-aligned start position
-        if page_aligned_start < num_tokens_to_free:
-            aligned_tokens_to_free = tokens_to_free[page_aligned_start:]
-            token_to_kv_pool_allocator.free(aligned_tokens_to_free)
+            # Radix cache truncates to page-aligned length
+            page_aligned_seq_len = actual_seq_len // page_size * page_size
+
+            # Only free tokens that are beyond what radix cache can see
+            # and align to page boundaries to avoid partial page issues
+            if start_len < page_aligned_seq_len:
+                # Some tokens might be handled by radix cache, be conservative
+                # Only free tokens from the next page boundary after what radix cache sees
+                next_page_boundary = (
+                    (page_aligned_seq_len + page_size - 1) // page_size
+                ) * page_size
+                if next_page_boundary < allocate_len:
+                    tokens_to_free = req_token_indices[next_page_boundary:allocate_len]
+                    if len(tokens_to_free) > 0:
+                        token_to_kv_pool_allocator.free(tokens_to_free)
+            else:
+                # All tokens are beyond radix cache visibility, safe to free
+                # But still align to page boundaries
+                page_aligned_start = (
+                    (start_len + page_size - 1) // page_size
+                ) * page_size
+                if page_aligned_start < allocate_len:
+                    tokens_to_free = req_token_indices[page_aligned_start:allocate_len]
+                    token_to_kv_pool_allocator.free(tokens_to_free)
+        else:
+            # Case 2: Radix cache truncation happens AFTER this function
+            # We need to ensure we don't free tokens that radix cache will handle later
+
+            # Calculate what radix cache will see and free
+            all_token_len = (
+                len(req.origin_input_ids) + len(req.output_ids) - 1
+            )  # Exclude last token
+            actual_kv_len = all_token_len - 1  # For EAGLE, bigram keys
+            page_aligned_kv_len = actual_kv_len // page_size * page_size
+
+            # Debug logging to understand the calculation
+            logger.info(
+                f"free_spec_dec_tokens_page_size_1: calculation details - "
+                f"origin_input_ids_len={len(req.origin_input_ids)}, "
+                f"output_ids_len={len(req.output_ids)}, "
+                f"all_token_len={all_token_len}, "
+                f"actual_kv_len={actual_kv_len}, "
+                f"page_aligned_kv_len={page_aligned_kv_len}, "
+                f"allocate_len={allocate_len}"
+            )
+
+            # Radix cache will free kv_indices[page_aligned_kv_len:]
+            # This means radix cache will free tokens from page_aligned_kv_len to all_token_len
+
+            # We should only free tokens that are beyond what radix cache will handle
+            # Since radix cache handles up to all_token_len, we should only free beyond that
+            if all_token_len < allocate_len:
+                tokens_to_free = req_token_indices[all_token_len:allocate_len]
+                if len(tokens_to_free) > 0:
+                    # For page_size > 1, we need to align to page boundaries based on actual token indices
+                    # We need to ensure we only free complete pages, not partial pages
+
+                    # Get the actual token indices we want to free
+                    actual_indices_to_free = tokens_to_free
+
+                    # Calculate page boundaries based on actual indices
+                    # We need to be very careful about page alignment to avoid conflicts with radix cache
+                    if len(actual_indices_to_free) > 0:
+                        first_token_idx = actual_indices_to_free[0].item()
+                        last_token_idx = actual_indices_to_free[-1].item()
+
+                        # Calculate page-aligned boundaries
+                        first_page = first_token_idx // page_size
+                        last_page = last_token_idx // page_size
+
+                        # Check if radix cache will free any tokens in the same pages
+                        # Radix cache frees kv_indices[page_aligned_kv_len:] where page_aligned_kv_len=1544
+                        # We need to get the actual token indices that radix cache will free
+                        radix_tokens_to_free = req_token_indices[
+                            page_aligned_kv_len:all_token_len
+                        ]
+
+                        logger.info(
+                            f"free_spec_dec_tokens_page_size_1: radix analysis - "
+                            f"page_aligned_kv_len={page_aligned_kv_len}, all_token_len={all_token_len}, "
+                            f"radix_tokens_to_free={radix_tokens_to_free.tolist() if len(radix_tokens_to_free) > 0 else []}"
+                        )
+
+                        if len(radix_tokens_to_free) > 0:
+                            radix_first_token = radix_tokens_to_free[0].item()
+                            radix_last_token = radix_tokens_to_free[-1].item()
+                            radix_start_page = radix_first_token // page_size
+                            radix_end_page = radix_last_token // page_size
+                        else:
+                            radix_start_page = radix_end_page = -1
+
+                        logger.info(
+                            f"free_spec_dec_tokens_page_size_1: page analysis - "
+                            f"our_tokens={actual_indices_to_free.tolist()}, "
+                            f"our_pages={first_page} to {last_page}, "
+                            f"radix_pages={radix_start_page} to {radix_end_page}"
+                        )
+
+                        # Check for overlap with radix cache pages and only free non-overlapping pages
+                        # Handle non-contiguous tokens that may span multiple pages
+                        tokens_to_free_final = []
+
+                        for token_idx in actual_indices_to_free:
+                            token_page = token_idx.item() // page_size
+
+                            # Check if this specific token's page overlaps with radix cache pages
+                            if radix_start_page <= token_page <= radix_end_page:
+                                # This token's page overlaps with radix cache, skip it
+                                logger.info(
+                                    f"free_spec_dec_tokens_page_size_1: skipping token {token_idx.item()} "
+                                    f"in page {token_page} - overlaps with radix cache pages {radix_start_page}-{radix_end_page}"
+                                )
+                            else:
+                                # This token's page doesn't overlap, safe to free
+                                logger.info(
+                                    f"free_spec_dec_tokens_page_size_1: keeping token {token_idx.item()} "
+                                    f"in page {token_page} - no overlap with radix cache pages {radix_start_page}-{radix_end_page}"
+                                )
+                                tokens_to_free_final.append(token_idx)
+
+                        if len(tokens_to_free_final) > 0:
+                            tokens_to_free_tensor = torch.stack(tokens_to_free_final)
+                            logger.info(
+                                f"free_spec_dec_tokens_page_size_1: freeing non-overlapping tokens - "
+                                f"tokens={tokens_to_free_tensor.tolist()}"
+                            )
+                            token_to_kv_pool_allocator.free(tokens_to_free_tensor)
+                        else:
+                            logger.info(
+                                f"free_spec_dec_tokens_page_size_1: no non-overlapping tokens to free"
+                            )
+                    else:
+                        logger.info(
+                            f"free_spec_dec_tokens_page_size_1: no tokens to free"
+                        )

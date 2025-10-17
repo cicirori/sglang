@@ -15,6 +15,11 @@ limitations under the License.
 
 from __future__ import annotations
 
+from logging import getLogger
+
+logger = getLogger(__name__)
+
+import traceback
 from dataclasses import dataclass
 
 from sglang.srt.configs.mamba_utils import Mamba2CacheParams
@@ -87,12 +92,18 @@ class ReqToTokenPool:
         self.free_slots = list(range(size))
 
     def write(self, indices, values):
+        logger.info(
+            f"Allocating {indices} tokens from request-to-token pool\n{traceback.format_stack()}"
+        )
         self.req_to_token[indices] = values
 
     def available_size(self):
         return len(self.free_slots)
 
     def alloc(self, need_size: int) -> List[int]:
+        logger.info(
+            f"Allocating {need_size} tokens from request-to-token pool\n{traceback.format_stack()}"
+        )
         if need_size > len(self.free_slots):
             return None
 

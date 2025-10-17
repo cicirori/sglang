@@ -20,11 +20,15 @@ Page-aligned memory pool.
 """
 
 import abc
+import traceback
+from logging import getLogger
 from typing import TYPE_CHECKING
 
 import torch
 import triton
 import triton.language as tl
+
+logger = getLogger(__name__)
 
 from sglang.srt.mem_cache.memory_pool import SWAKVPool
 from sglang.srt.utils import get_bool_env_var, get_num_new_pages, next_power_of_2
@@ -143,6 +147,9 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         return len(self.free_pages) + len(self.release_pages)
 
     def alloc(self, need_size: int):
+        logger.info(
+            f"Allocating {need_size} tokens from paged allocator\n{''.join(traceback.format_stack())}"
+        )
         if self.need_sort and need_size > len(self.free_pages):
             self.merge_and_sort_free()
 
@@ -154,6 +161,9 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         return select_index
 
     def free(self, free_index: torch.Tensor):
+        logger.info(
+            f"Freeing {free_index.numel()} tokens from paged allocator\n{''.join(traceback.format_stack())}"
+        )
         if free_index.numel() == 0:
             return
 
@@ -434,6 +444,9 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         self.clear()
 
     def alloc(self, need_size: int):
+        logger.info(
+            f"Allocating {need_size} tokens from paged allocator\n{''.join(traceback.format_stack())}"
+        )
         # page-aligned allocation, returning contiguous indices of pages
         if self.debug_mode:
             assert (
@@ -506,6 +519,10 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         if num_new_pages > len(self.free_pages):
             return None
 
+        logger.info(
+            f"Allocated {num_new_pages=} {out_indices=}\n{''.join(traceback.format_stack())}"
+        )
+
         self.free_pages = self.free_pages[num_new_pages:]
         return out_indices
 
@@ -544,16 +561,25 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         )
         if num_new_pages > len(self.free_pages):
             return None
+        logger.info(
+            f"alloc decode Allocated {num_new_pages=}  {out_indices=}new pages\n{''.join(traceback.format_stack())}"
+        )
 
         self.free_pages = self.free_pages[num_new_pages:]
         return out_indices
 
     def free(self, free_index: torch.Tensor):
+        logger.info(
+            f"Freeing {free_index} from paged allocator\n{''.join(traceback.format_stack())}"
+        )
         if free_index.numel() == 0:
             return
 
         if self.is_not_in_free_group:
             free_page_indices = torch.unique(free_index // self.page_size)
+            logger.info(
+                f"Freeing {len(free_page_indices)} pages from paged allocator\n{''.join(traceback.format_stack())}"
+            )
             if self.need_sort:
                 self.release_pages = torch.cat((free_page_indices, self.release_pages))
             else:
@@ -562,7 +588,12 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             self.free_group.append(free_index)
 
         if self.debug_mode:
-            assert len(torch.unique(self.free_pages)) == len(self.free_pages)
+            unique_pages, counts = torch.unique(self.free_pages, return_counts=True)
+            duplicates = unique_pages[counts > 1]
+
+            assert len(unique_pages) == len(
+                self.free_pages
+            ), f"Duplicate free_pages detected: {duplicates.tolist()}"
 
     def clear(self):
         # The padded slot 0 is used for writing dummy outputs from padded tokens.

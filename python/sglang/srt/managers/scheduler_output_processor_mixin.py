@@ -253,7 +253,10 @@ class SchedulerOutputProcessorMixin:
         if not self.spec_algorithm.is_none():
             self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
 
-        self.token_to_kv_pool_allocator.free_group_begin()
+        # self.token_to_kv_pool_allocator.free_group_begin()
+        print(
+            f"Batch is v2 eagle: {batch.is_v2_eagle}, Forward mode is extend: {self.cur_batch.forward_mode.is_extend() if self.cur_batch and self.cur_batch.forward_mode else 'N/A'}"
+        )
 
         # Check finish condition
         # NOTE: the length of reqs and next_token_ids don't match if it is spec decoding.
@@ -323,6 +326,9 @@ class SchedulerOutputProcessorMixin:
             req.check_finished()
             if req.finished():
                 if batch.is_v2_eagle and self.cur_batch.forward_mode.is_extend():
+                    logger.info(
+                        f"Speculative decoding req {req.rid} finished. Free extra tokens."
+                    )
                     # FIXME(lsyin): fix the messy logic here
                     # 1) when not overlap (v2 impl), we free the extra tokens in the req
                     # 2) when overlap and current batch is extend, we free the extra tokens in the req of the previous batch
@@ -392,7 +398,7 @@ class SchedulerOutputProcessorMixin:
                 req.grammar.finished = req.finished()
 
         self.stream_output(batch.reqs, batch.return_logprob)
-        self.token_to_kv_pool_allocator.free_group_end()
+        # self.token_to_kv_pool_allocator.free_group_end()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
         if (
